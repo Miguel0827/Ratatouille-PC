@@ -1,0 +1,182 @@
+﻿# Ratatouille PC - installer: prepares the converter (ps2-native-recomp + this project's fixes) and
+# turns the player's own disc image into the native PC program. Nothing of the game is in this project; it all comes from the ISO.
+#   Instalar.ps1 -Iso "C:\path\Ratatouille.iso" [-Root C:\PS2Native]
+param([Parameter(Mandatory = $true)][string]$Iso, [string]$Root = '')
+$ErrorActionPreference = 'Stop'
+# any failure ends with a line the launcher shows (and no LISTO line)
+trap { Write-Host ''; Write-Host "ERROR: $($_.Exception.Message)"; if ($Lock) { Remove-Item $Lock -ErrorAction SilentlyContinue }; exit 1 }
+$Here    = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Package = Split-Path -Parent $Here
+if (-not $Root) { $Root = Join-Path $Package 'engine' }
+New-Item -ItemType Directory -Force $Root | Out-Null
+$short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($Root).ShortPath   # no spaces for the build tools
+if ($short -and $short -notmatch ' ') { $Root = $short }
+# A drive without short names (8.3) keeps the spaces: the build then works through a link without spaces to the same folder,
+# in the user's local application data (a junction: no administrator needed; deleting it leaves the engine folder as it is).
+if ($Root -match ' ') {
+    $base = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:LOCALAPPDATA).ShortPath
+    if ($base -and $base -notmatch ' ') {
+        $sha = [Security.Cryptography.SHA1]::Create()
+        $tag = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant()))[0..3] | ForEach-Object { $_.ToString('x2') })
+        $link = Join-Path $base "PS2Native\ratatouille-$tag"
+        New-Item -ItemType Directory -Force (Split-Path $link) | Out-Null
+        if (-not (Test-Path (Join-Path $link 'install.lock')) -and -not (Test-Path $link)) { [void](cmd /c mklink /J "`"$link`"" "`"$Root`"") }
+        if (Test-Path $link) { $Root = $link }
+    }
+}
+$Commit  = 'b1af7232b3200b12fbb8135ba583364c992f0aa5'   # the ps2-native-recomp version the fixes are made for
+$Patch   = Join-Path $Package 'patches\ratatouille-fixes.patch'
+$Marker  = Join-Path $Root '.ratatouille-fixes-applied'
+
+function Step([string]$text) { Write-Host ''; Write-Host "=== $text ===" }
+function PosixPath([string]$p) { $p.Replace('\', '/') }
+# Runs a program. What it writes to stderr (warnings such as "vu0 ... using interpreter") is only shown: under 'Stop' Windows
+# PowerShell turns every stderr line of a program into an error that ends the script. Its exit code decides (in $LASTEXITCODE).
+function Run {
+    $ErrorActionPreference = 'Continue'
+    $exe, $rest = $args
+    & $exe @rest 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host $_.Exception.Message } else { Write-Host $_ } }
+}
+
+if (-not (Test-Path $Iso)) { throw "No existe la ISO: $Iso" }
+# one installation at a time: the launcher looks at this file (the process id of the installation running now)
+$Lock = Join-Path $Root 'install.lock'
+Set-Content -Path $Lock -Value $PID -Encoding ascii
+
+# ---------------------------------------------------------------- 1. the converter
+# The marker names the converter version and this package's fixes. Fixes from an older package (an update extracted over it)
+# mean the converter's original files are fetched again over the old ones and the new fixes applied to them.
+$PatchId = "$Commit " + (Get-FileHash $Patch -Algorithm SHA256).Hash.Substring(0, 16)
+$applied = if (Test-Path $Marker) { ((Get-Content $Marker -Raw) -as [string]).Trim() } else { '' }
+$stale = [bool]$applied -and $applied -ne $PatchId
+if ($stale -or -not (Test-Path (Join-Path $Root 'scripts\port.sh'))) {   # an empty engine folder, or older fixes to replace
+    Step "Descargando ps2-native-recomp ($($Commit.Substring(0, 12)))"
+    $tmp = Join-Path $env:TEMP "ratatouille-pc-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force $tmp | Out-Null
+    # this project's own copy (fork) first, the original repository if the copy cannot be reached
+    $got = $false
+    foreach ($owner in @('Miguel0827', 'exoteric33')) {
+        try { Invoke-WebRequest -UseBasicParsing "https://github.com/$owner/ps2-native-recomp/archive/$Commit.zip" -OutFile "$tmp\src.zip"; $got = $true; break }
+        catch { Write-Host "no se pudo descargar de $owner, probando el otro repositorio..." }
+    }
+    if (-not $got) { throw 'No se pudo descargar ps2-native-recomp (¿sin internet?).' }
+    Expand-Archive "$tmp\src.zip" "$tmp\x" -Force
+    New-Item -ItemType Directory -Force $Root | Out-Null
+    Copy-Item "$tmp\x\ps2-native-recomp-$Commit\*" $Root -Recurse -Force
+    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+}
+Set-Location $Root
+
+if (-not (Test-Path (Join-Path $Root 'tools\portable\env.ps1'))) {
+    Step 'Herramientas portables (compilador, cmake, python, bash)'
+    Run "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'scripts\portable.ps1') -ForApp
+    if ($LASTEXITCODE -ne 0) { throw "portable.ps1 falló ($LASTEXITCODE)" }
+}
+$isoPath = $Iso; $rootPath = $Root   # env.ps1 overwrites some variables of the caller
+. (Join-Path $Root 'tools\portable\env.ps1') -Quiet
+$Iso = $isoPath; $Root = $rootPath
+Set-Location $Root
+$bash = Join-Path $Root 'tools\portable\mingit\usr\bin\bash.exe'
+$git  = (Get-ChildItem (Join-Path $Root 'tools\portable\mingit') -Recurse -Filter git.exe | Select-Object -First 1).FullName
+
+if ($stale -or -not (Test-Path $Marker)) {
+    Step 'Aplicando los arreglos de Ratatouille PC al convertidor'
+    Run $git apply --ignore-whitespace -p1 $Patch
+    if ($LASTEXITCODE -ne 0) { throw 'No se pudieron aplicar los arreglos (¿otra versión de ps2-native-recomp?)' }
+    Set-Content -Path $Marker -Value $PatchId -Encoding ascii
+}
+
+Step 'Compilando el convertidor (setup.sh)'
+Run $bash (PosixPath (Join-Path $Root 'scripts\setup.sh')) --native-only
+if ($LASTEXITCODE -ne 0) { throw "setup.sh falló ($LASTEXITCODE)" }
+
+# ---------------------------------------------------------------- 2. which version is the disc
+Step 'Reconociendo la versión del disco'
+$probe = Join-Path $Root 'games\_probe'
+Remove-Item $probe -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $probe | Out-Null
+$fetch = & { $ErrorActionPreference = 'Continue'; & python -I (Join-Path $Root 'scripts\pnach.py') fetch (PosixPath $Iso) --out (PosixPath $probe) 2>&1 | ForEach-Object { "$_" } } | Out-String
+Write-Host $fetch
+$elfName = if ($fetch -match 'program:\s+([A-Z]{4}_\d{3}\.\d{2})') { $Matches[1] } else { '' }
+switch -regex ($elfName) {
+    '^SLES_547\.47$' { $name = 'ratatouille_eu'; $region = 'eu'; break }
+    '^SLUS_215\.41$' { $name = 'ratatouille_us'; $region = 'us'; break }
+    default { throw "Este disco no es una versión soportada de Ratatouille (programa: '$elfName'). Soportadas: Europa SLES-54747, USA SLUS-21541." }
+}
+$pnach = Get-ChildItem $probe -Filter *.pnach | Select-Object -First 1
+# the USA disc has no patch file at PCSX2: this project's own (PeterDelta's European patches moved to the USA disc's places)
+ if (-not $pnach -and $region -eq 'us') { $pnach = Get-Item (Join-Path $Package 'patches\ratatouille-usa.pnach') }
+if (-not $pnach) { throw 'No se pudo descargar el archivo de parches de PCSX2 (¿sin internet?).' }
+$patchDir = Join-Path $Root "games\patches_$region"
+New-Item -ItemType Directory -Force $patchDir | Out-Null
+Copy-Item $pnach.FullName $patchDir -Force
+$pnachFile = Join-Path $patchDir $pnach.Name
+Remove-Item $probe -Recurse -Force -ErrorAction SilentlyContinue
+
+# the sections of the patch file: wide screen, and the 480p mode (no interlacing)
+$sections = @(Select-String -Path $pnachFile -Pattern '^\[(.+)\]\s*$' | ForEach-Object { $_.Matches[0].Groups[1].Value })
+$wsSection    = $sections | Where-Object { $_ -match 'Widescreen' } | Select-Object -First 1
+$nointSection = $sections | Where-Object { $_ -match 'Interlac|480p' } | Select-Object -First 1
+Write-Host "versión: $region ($elfName); parches: [$wsSection] [$nointSection]"
+
+# ---------------------------------------------------------------- 3. the port
+# Each import starts clean: what an earlier import of this version left (finished, or stopped half way) goes, except the player's
+# saves and settings. Without region.json the launcher does not list the version until this import has finished.
+$gameDir = Join-Path $Root "games\$name"
+$saved = Join-Path $env:TEMP "ratatouille-pc-saves-$name"
+Remove-Item $saved -Recurse -Force -ErrorAction SilentlyContinue
+if (Test-Path $gameDir) {
+    Step "Limpiando una instalación anterior de $name (se conservan partidas y configuración)"
+    New-Item -ItemType Directory -Force $saved | Out-Null
+    Get-ChildItem $gameDir -Force | Where-Object { $_.Name -match '^(memcard\.ps2.*|keys\.ini|states|reports)$' } | ForEach-Object { Copy-Item $_.FullName $saved -Recurse -Force }
+    Remove-Item $gameDir -Recurse -Force
+}
+foreach ($old in @((Join-Path $Root "build\native-$name"), (Join-Path $Root "generated\$name"))) { if (Test-Path $old) { Remove-Item $old -Recurse -Force } }
+New-Item -ItemType Directory -Force $gameDir | Out-Null
+# The game starts by calling 95 start-up functions through a list the static translation cannot see (C++ constructors): their
+# addresses, read once from each disc, go in as entry points so the conversion's test run gets past the first frame.
+ Copy-Item (Join-Path $Package "patches\$name.entries") (Join-Path $gameDir 'entries.txt') -Force
+if (Test-Path $saved) { Get-ChildItem $saved -Force | ForEach-Object { Copy-Item $_.FullName $gameDir -Recurse -Force }; Remove-Item $saved -Recurse -Force }
+$backup = Join-Path $Root "saves-backup\$name"   # what the launcher's Delete kept
+if (Test-Path $backup) { Get-ChildItem $backup -Force | ForEach-Object { Copy-Item $_.FullName $gameDir -Recurse -Force }; Remove-Item $backup -Recurse -Force }
+Step "Convirtiendo el juego ($name) - tarda varios minutos"
+$env:PS2_GPU_LOW_POWER = '0'   # the conversion's test runs on the fast graphics card (port.sh would pick the power-saving one)
+$portArgs = @((PosixPath (Join-Path $Root 'scripts\port.sh')), $name, (PosixPath $Iso), '--native-only')
+if ($wsSection) { $portArgs += @('--pnach', (PosixPath $pnachFile), '--pnach-section', $wsSection) }
+Run $bash @portArgs
+if ($LASTEXITCODE -ne 0) { throw "port.sh falló ($LASTEXITCODE)" }
+# The game reads its disc from games\<name>\disc.iso. port.sh puts a hard link to the ISO there, which only works on the same
+# drive: an ISO on another drive (or one a hard link cannot reach) is copied instead.
+$discIso = Join-Path $gameDir 'disc.iso'
+if (-not (Test-Path $discIso)) {
+    try { New-Item -ItemType HardLink -Path $discIso -Target $Iso -ErrorAction Stop | Out-Null }
+    catch { Step 'Copiando la ISO junto al juego (está en otra unidad)'; Copy-Item -LiteralPath $Iso -Destination $discIso -Force }
+}
+
+# ---------------------------------------------------------------- 4. what the launcher needs
+Step 'Preparando las opciones del launcher'
+$game = $gameDir
+$sets = Join-Path $game 'patchsets'
+New-Item -ItemType Directory -Force $sets | Out-Null
+$elf = Join-Path $game "disc\$elfName"
+$tmpElf = Join-Path $sets 'tmp.elf'
+function Write-Set([string]$file, [string[]]$names) {
+    $out = Join-Path $sets $file
+    $parts = @()
+    foreach ($s in $names) {
+        if (-not $s) { continue }
+        $one = Join-Path $sets 'one.txt'
+        Run python -I (Join-Path $Root 'scripts\pnach.py') apply (PosixPath $elf) (PosixPath $tmpElf) (PosixPath $one) --section $s (PosixPath $pnachFile)
+        if (Test-Path $one) { $parts += [IO.File]::ReadAllText($one).TrimEnd(); Remove-Item $one }
+        Remove-Item $tmpElf -ErrorAction SilentlyContinue
+    }
+    [IO.File]::WriteAllText($out, (($parts | Where-Object { $_ }) -join "`n"))
+}
+Write-Set 'ws.txt' @($wsSection)
+Write-Set 'noint.txt' @($nointSection)
+$info = [ordered]@{ name = $name; region = $region; elf = $elfName; widescreen = [bool]$wsSection
+                    languages = $(if ($region -eq 'eu') { @(3) } else { @(1) }) }   # the game asks for its language itself
+[IO.File]::WriteAllText((Join-Path $game 'region.json'), ($info | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+Write-Host ''
+Remove-Item $Lock -ErrorAction SilentlyContinue
+Write-Host "LISTO: $name instalado. Abre el juego desde el launcher."

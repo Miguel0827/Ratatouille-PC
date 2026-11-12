@@ -1,0 +1,17 @@
+gametitle=Disney-Pixar Ratatouille (NTSC-U) SLUS-21541 7A07717B
+// The USA disc has no patch file at PCSX2. These are PeterDelta's patches for the European disc (SLES-54747), moved to the
+// places the same code and variable have on the USA disc (Ratatouille PC, by NyxBorn).
+
+[Widescreen 16:9]
+gsaspectratio=16:9
+author=PeterDelta (USA port: NyxBorn)
+description=Enable native widescreen
+patch=1,EE,0067C470,word,3FE38E39 //3FAAAAAB
+
+[480p Mode]
+gsinterlacemode=1
+author=PeterDelta (USA port: NyxBorn)
+description=SDTV 480p mode at start.
+patch=1,EE,004E0624,word,24110000
+patch=1,EE,004E0628,word,24120050
+patch=1,EE,004E0634,word,24130001
