@@ -12,7 +12,7 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 # The game inherits this: no Windows "has stopped working" box when it crashes; the launcher explains it in its own window.
 Add-Type -Namespace Native -Name Err -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetErrorMode(uint mode);'
 [void][Native.Err]::SetErrorMode(0x8003)
-$Version = 'v1.0.0'   # this package's release (in the footer and in error reports)
+$Version = 'v1.0.1'   # this package's release (in the footer and in error reports)
 $IssuesUrl = 'https://github.com/Miguel0827/Ratatouille-PC'
 
 $Here    = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -583,7 +583,26 @@ function Relayout([bool]$showVer = $script:showVer, [bool]$showGame = $script:sh
     # ReShade installed for this game (its setup leaves ReShade.ini, or its DLL, next to the game's program): the on/off box; else
 # the Install button
     $hasRs = $false; $cg = Current-Game
-    if ($cg) { $bin = Join-Path $Root "build\native-$($cg.name)"; $hasRs = (Test-Path (Join-Path $bin 'ReShade.ini')) -or (Test-Path (Join-Path $bin 'ReShade64.dll')) -or (Test-Path (Join-Path $bin 'dxgi.dll')) }
+    if ($cg) {
+        $bin = Join-Path $Root "build\native-$($cg.name)"
+        $hasRs = (Test-Path (Join-Path $bin 'ReShade.ini')) -or (Test-Path (Join-Path $bin 'ReShade64.dll')) -or (Test-Path (Join-Path $bin 'dxgi.dll'))
+        # or ReShade's Vulkan layer, installed for the whole PC, with this game's program in its list of programs
+        if (-not $hasRs) {
+            try {
+                $exeFull = (Get-Item (Join-Path $bin 'ps2run.exe') -ErrorAction Stop).FullName
+                foreach ($k in 'HKLM:\SOFTWARE\Khronos\Vulkan\ImplicitLayers', 'HKCU:\SOFTWARE\Khronos\Vulkan\ImplicitLayers') {
+                    if (-not (Test-Path $k)) { continue }
+                    foreach ($json in @((Get-Item $k).Property | Where-Object { $_ -match 'ReShade' })) {
+                        $apps = Join-Path (Split-Path -Parent $json) 'ReShadeApps.ini'
+                        if (Test-Path $apps) {
+                            $list = ((Get-Content $apps -Raw) -replace '(?m)^Apps=', '') -split '[,\r\n]+' | Where-Object { $_ }
+                            if ($list | Where-Object { $_.Trim() -ieq $exeFull }) { $hasRs = $true }
+                        }
+                    }
+                }
+            } catch {}
+        }
+    }
     $kReshade.Visible = $showReshade -and $hasRs; $bRs.Visible = $showReshade -and -not $hasRs
     $gone = @(); if (-not $showVer) { $gone += , @($verTop, 32) }; if (-not $showGame) { $gone += , @($gameTop, 32) }; if (-not $showReshade) { $gone += , @($reshadeTop, 30) }
     $total = 0; foreach ($g in $gone) { $total += $g[1] }
