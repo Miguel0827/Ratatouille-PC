@@ -3,6 +3,6 @@
   "format": 1,
   "repo": "Miguel0827/Ratatouille-PC",
   "start": {
-    "program": ["Ratatouille PC - Config.exe"]
+    "program": ["Ratatouille PC - Config.exe", "linux/config.sh"]
   }
 }
