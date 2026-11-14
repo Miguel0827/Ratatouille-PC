@@ -24,7 +24,7 @@ if ($Root -match ' ') {
         if (Test-Path $link) { $Root = $link }
     }
 }
-$Commit  = 'b1af7232b3200b12fbb8135ba583364c992f0aa5'   # the ps2-native-recomp version the fixes are made for
+$Commit  = '5d1ebbcf133cb3c31df75a294dbe38e30734c1ce'   # the ps2-native-recomp version the fixes are made for
 $Patch   = Join-Path $Package 'patches\ratatouille-fixes.patch'
 $Marker  = Join-Path $Root '.ratatouille-fixes-applied'
 
@@ -64,6 +64,12 @@ if ($stale -or -not (Test-Path (Join-Path $Root 'scripts\port.sh'))) {   # an em
     New-Item -ItemType Directory -Force $Root | Out-Null
     Copy-Item "$tmp\x\ps2-native-recomp-$Commit\*" $Root -Recurse -Force
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    # what the old converter compiled: its runtime again from scratch (a newer one has other source files), and each game's build
+    # set-up made again (its program and ReShade's files stay, so the game keeps showing until it is imported again)
+    Get-ChildItem (Join-Path $Root 'build') -Directory -Filter 'runtime-*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+    Get-ChildItem (Join-Path $Root 'build') -Directory -Filter 'native-*' -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-ChildItem $_.FullName -Force | Where-Object { $_.Name -in 'CMakeCache.txt', 'CMakeFiles', 'build.ninja', '.ninja_deps', '.ninja_log', 'cmake_install.cmake' } | Remove-Item -Recurse -Force
+    }
 }
 Set-Location $Root
 
